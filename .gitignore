@@ -1,0 +1,32 @@
+# ---- 機密/執行期設定檔 (含真實 token、帳密,絕不上傳) ----
+accounts.json
+settings.json
+tg_tokens.json
+tg_relay_config.json
+service_account.json
+*_admin_config.json
+update_admin_config.json
+
+# ---- 帳號 Cookie / 登入態 ----
+profiles/
+*.session
+*cookie*.json
+runtime/
+
+# ---- 本機 IDE / 工具設定 ----
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ---- 暫存 / 日誌 / 打包輸出 ----
+*.log
+logs/
+_dryrun_*.zip
+*.tmp

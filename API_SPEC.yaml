@@ -1,0 +1,700 @@
+openapi: 3.0.3
+info:
+  title: XDZHGL2.0 Local API
+  version: "1.0"
+  description: |
+    本機 HTTP API,給外部 daemon agent (TG bot @example_daemon_bot) 調用。
+    bind 127.0.0.1 only,絕不暴露公網。
+
+    **階段 1 端點(2026-04-29 v6.0.46)**:9 個端點(version + health + 3 state + 4 IM)。
+    階段 2/3 會加 orders / sourcing / perf / publish events 等,api_compat_version 不變。
+
+    **認證**:
+    - 讀類端點:豁免 token(127.0.0.1 連線即可)
+    - 寫類端點:必須帶 `X-API-Token: <token>` 或 `Authorization: Bearer <token>`,token 在 XDZHGL `settings.json` 的 `api_token` 字段(daemon 啟動時讀)
+
+    **Idempotency**:寫類端點接受 `idempotency_key`(body 字段),24h TTL,重試會回上次響應而不重發。
+    **idem 命中時 server 加 `X-Idempotent-Replay: true` response header**,daemon 用這個區分「真發了 vs 上次響應 cache」,避免重複統計成功率。
+
+    **Circuit Breaker**:同帳號 60 秒內 ≥5 次寫類錯誤 → 503 + `Retry-After: 60`。daemon 收到必須退避。
+
+    **H 條保護**:`/api/im/send` 強制檢核 `receiver` 必須跟 `channel_id` 解析的買家 Y-ID 同源(防止 A 客戶訊息發給 B)。
+
+servers:
+  - url: http://127.0.0.1:7777
+    description: |
+      本機唯一端點。**port 不要 hardcode** — daemon 從 XDZHGL `settings.json.api_port` 讀,
+      預設 7777,user 可改。本 yaml 寫 7777 是預設值示例。
+
+# ────────────────────── 認證 ──────────────────────
+components:
+  securitySchemes:
+    ApiToken:
+      type: apiKey
+      in: header
+      name: X-API-Token
+    Bearer:
+      type: http
+      scheme: bearer
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        detail:
+          type: string
+
+    VersionResponse:
+      type: object
+      required: [software_name, version, api_version, api_compat_version, started_at]
+      properties:
+        software_name:
+          type: string
+          example: xdzhgl
+        version:
+          type: string
+          description: 軟件本身版本,從 current_version.txt 讀
+          example: "6.0.46"
+        api_version:
+          type: string
+          description: API 端點集版本(加端點 +1)
+          example: "1.0"
+        api_compat_version:
+          type: string
+          description: 不兼容變更才 +1。daemon 啟動只檢這個,不對就退回 fallback
+          example: "1"
+        started_at:
+          type: number
+          format: float
+          description: API server 啟動 unix 時間
+
+    HealthResponse:
+      type: object
+      required: [ok, started_at, uptime_sec]
+      properties:
+        ok:
+          type: boolean
+        started_at:
+          type: number
+          format: float
+        uptime_sec:
+          type: integer
+        monitor_attached:
+          type: boolean
+        conv_mgr_attached:
+          type: boolean
+        publish_tab_attached:
+          type: boolean
+
+    AccountSnapshot:
+      type: object
+      properties:
+        name:
+          type: string
+        profile_id:
+          type: string
+        selected:
+          type: boolean
+        monitor_selected:
+          type: boolean
+        running:
+          type: boolean
+        status:
+          type: string
+          example: 在线
+        suspended:
+          type: boolean
+        item_count:
+          type: integer
+        paid_to_ship:
+          type: integer
+        cod:
+          type: integer
+        im:
+          type: integer
+        im_persist_rounds:
+          type: integer
+        last_error:
+          type: string
+        last_check_ts:
+          type: number
+          format: float
+        last_check_age_sec:
+          type: integer
+          nullable: true
+          description: monitor 多久沒 tick(秒)。null 表示從未跑過
+        next_run_ts:
+          type: number
+          format: float
+        held_reasons:
+          type: array
+          items:
+            type: string
+
+    StateAccountsResponse:
+      type: object
+      properties:
+        ts:
+          type: number
+        concurrency:
+          type: integer
+        running_count:
+          type: integer
+        total_count:
+          type: integer
+        accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccountSnapshot'
+        note:
+          type: string
+          description: monitor 未啟動時出現
+
+    ConversationSnapshot:
+      type: object
+      properties:
+        conv_id:
+          type: string
+        profile_id:
+          type: string
+        account_name:
+          type: string
+        chat_id:
+          type: string
+        chat_url:
+          type: string
+        buyer_label:
+          type: string
+        buyer_text_preview:
+          type: string
+          maxLength: 200
+        buyer_text_len:
+          type: integer
+        unread_count:
+          type: integer
+        phase:
+          type: string
+          enum:
+            - PENDING_AI
+            - PREVIEW_SENT
+            - WAIT_SELLER
+            - PREVIEW_SELLER
+            - PREVIEW_SELLER_QUESTION
+            - AUTO_ASKING_SELLER
+            - ERROR
+        ai_action:
+          type: string
+          example: AUTO_REPLY
+          description: AUTO_REPLY / NEED_SELLER / NO_REPLY / NEED_PRODUCT_DATA / NEED_CLARIFY / STICKER_READ
+        ai_draft:
+          type: string
+          description: AI 生成的草稿(完整)
+        ai_draft_len:
+          type: integer
+        ai_internal_note:
+          type: string
+        shop_code:
+          type: string
+        product_can_buy:
+          type: string
+          example: 是
+        product_title:
+          type: string
+        seller_answer_len:
+          type: integer
+        ai_integrated_draft:
+          type: string
+        final_reply_len:
+          type: integer
+        error_msg:
+          type: string
+        created_ts:
+          type: number
+        updated_ts:
+          type: number
+        age_sec:
+          type: integer
+        draft_age_sec:
+          type: integer
+          description: 從 updated_ts 算的秒數,daemon 用這個算「客戶等多久了」
+
+    StateConversationsResponse:
+      type: object
+      properties:
+        ts:
+          type: number
+        active_count:
+          type: integer
+        by_phase:
+          type: object
+          additionalProperties:
+            type: integer
+          description: "各 phase 計數,例如 {PENDING_AI: 2, PREVIEW_SENT: 5}"
+        pending_user_ack:
+          type: integer
+          description: PREVIEW_SENT/PREVIEW_SELLER_QUESTION/PREVIEW_SELLER 的總數,等 user 回 ok
+        conversations:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConversationSnapshot'
+        note:
+          type: string
+          description: conv manager 未啟動時出現,例如 "conv manager not started"
+        error:
+          type: string
+          description: 內部例外時出現(罕見)
+
+    PublishStatRow:
+      type: object
+      properties:
+        account:
+          type: string
+        excel:
+          type: string
+        success:
+          type: integer
+        fail:
+          type: integer
+        current_row:
+          type: integer
+        running:
+          type: boolean
+        started_at:
+          type: string
+        ended_at:
+          type: string
+        last_error:
+          type: string
+        base_success:
+          type: integer
+        base_fail:
+          type: integer
+
+    PublishProgressResponse:
+      type: object
+      properties:
+        ts:
+          type: number
+        paused:
+          type: boolean
+        stopping:
+          type: boolean
+        running_count:
+          type: integer
+        total_accounts:
+          type: integer
+        grand_success:
+          type: integer
+        grand_fail:
+          type: integer
+        accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublishStatRow'
+
+    ImMessagesResponse:
+      type: object
+      properties:
+        account:
+          type: string
+        channel_id:
+          type: string
+        shop_id:
+          type: string
+        limit:
+          type: integer
+        text:
+          type: string
+          description: 格式化後的對話【買家】/【賣家】 多行文本
+        len:
+          type: integer
+
+    ImSendRequest:
+      type: object
+      required: [account, channel_id, receiver, message]
+      properties:
+        account:
+          type: string
+          description: Yahoo 帳號名(對應 profile_id)
+        channel_id:
+          type: string
+          description: yahoo-bid-logbot1:y{seller}:y{buyer}
+          example: yahoo-bid-logbot1:y9000000003:y9000000002
+        receiver:
+          type: string
+          description: 對方 Y-ID(必須跟 channel_id 解析的買家同源,否則 403)
+          example: Y9000000002
+        message:
+          type: string
+          maxLength: 5000
+        shop_id:
+          type: string
+          description: 賣家 Y-ID,提供時更嚴格驗證 H 條
+          example: Y9000000003
+        idempotency_key:
+          type: string
+          description: 重試保險。同 key 24h 內回上次響應,不重發
+
+    ImSendResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        msg:
+          type: string
+        account:
+          type: string
+        channel_id:
+          type: string
+        sent_len:
+          type: integer
+
+    ImMarkReadRequest:
+      type: object
+      required: [account, channel_id]
+      properties:
+        account:
+          type: string
+        channel_id:
+          type: string
+        idempotency_key:
+          type: string
+
+    ImMarkReadResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        msg:
+          type: string
+
+    CircuitBreakerError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: circuit_open
+        retry_after_sec:
+          type: integer
+          example: 60
+        reason:
+          type: string
+
+  parameters:
+    AccountQuery:
+      name: account
+      in: query
+      required: true
+      schema:
+        type: string
+    ChannelIdQuery:
+      name: channel_id
+      in: query
+      required: true
+      schema:
+        type: string
+
+# ────────────────────── 端點 ──────────────────────
+paths:
+  /api/version:
+    get:
+      summary: 版本探測
+      description: |
+        daemon 啟動先打這個。
+        - `api_compat_version` 不對 → 退回動態 import / 子進程 fallback
+        - 軟件升級若沒改 compat,API 客戶端可繼續用
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+
+  /api/health:
+    get:
+      summary: server 自身存活探測
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/state/accounts:
+    get:
+      summary: 24 帳號實時狀態快照
+      description: |
+        從 monitor.get_snapshot() 拷出來。秒回。
+        取代 daemon 端 60s Playwright wrapper / 60s jsonl 輪詢。
+        包含 `last_check_age_sec` 看 monitor 多久沒 tick。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StateAccountsResponse'
+
+  /api/state/conversations:
+    get:
+      summary: 活躍 IM 對話列表 + ConvPhase
+      description: |
+        從 ConversationManager._convs 進 lock 拷出。**server 端 5 秒 cache**(避免高頻搶 lock)。
+        排除 phase 為 DONE/EXPIRED 的對話。
+
+        daemon 用 `pending_user_ack` 算「第 5 個草稿等 user 30 分了」。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StateConversationsResponse'
+
+  /api/publish/progress:
+    get:
+      summary: 自動刊登當前批次進度
+      description: |
+        從 AutoPublishFeatureTab._stats 拷。
+        daemon autonomous_tick 看到「running=true 但 current_row 卡 10 分鐘」可以告警。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishProgressResponse'
+
+  /api/im/messages:
+    get:
+      summary: 讀某 channel 的 IM 對話歷史(全文)
+      description: |
+        包 core.im_http_ops.im_read_messages,daemon 不再需要動態 import + sys.path 注入。
+        **PII 注意**:回的 text 含完整對話,daemon 自己決定要不要 redact。
+        audit log 不記訊息正文,只記 channel_id+ts。
+      parameters:
+        - $ref: '#/components/parameters/AccountQuery'
+        - $ref: '#/components/parameters/ChannelIdQuery'
+        - name: shop_id
+          in: query
+          schema:
+            type: string
+          description: 賣家 Y-ID(可選,但提供時方向解析更穩)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImMessagesResponse'
+        '400':
+          description: 缺參數
+        '404':
+          description: profile 不存在
+        '500':
+          description: im_http_ops 異常
+
+  /api/im/draft/{conv_id}:
+    get:
+      summary: 拿某對話正在等 user 確認的現有草稿
+      description: |
+        從 ConversationManager._convs[conv_id] 拷,**不重新呼叫 LLM**。
+        daemon 用這個取代 commander_decide 動態 import。
+      parameters:
+        - name: conv_id
+          in: path
+          required: true
+          schema:
+            type: string
+            description: 12 字 hex
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationSnapshot'
+        '400':
+          description: conv_id 必填
+        '404':
+          description: 對話不存在或已過期
+        '503':
+          description: conv manager 未啟動
+
+  /api/im/send:
+    post:
+      summary: 直接發 IM reply 給客戶
+      description: |
+        **寫類,需 X-API-Token**。
+        包 im_http_ops.im_send_message。
+
+        **H 條保護**:server 端會解析 channel_id 拿到買家 Y-ID,
+        必須跟 receiver 同源,否則 403(防止 A 客戶訊息發給 B)。
+
+        **Circuit Breaker**:該 account 60s 內連 ≥5 次寫類錯誤 → 503 + Retry-After 60。
+
+        **Idempotency**:body 帶 `idempotency_key`,24h 內同 key 不重發。
+      security:
+        - ApiToken: []
+        - Bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImSendRequest'
+      responses:
+        '200':
+          description: 發送成功(或 idem 命中時 replay 上次響應)
+          headers:
+            X-Idempotent-Replay:
+              schema:
+                type: string
+                enum: ["true"]
+              description: "只在 idem 命中時出現,值固定為 true。沒這個 header 表示是真實發送"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImSendResponse'
+        '400':
+          description: 缺參數 / channel_id 格式錯
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: token 缺失或不對
+        '403':
+          description: H 條保護觸發 — receiver 與 channel_id 解析的買家 Y-ID 不一致
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  parsed_buyer:
+                    type: string
+                  given_receiver:
+                    type: string
+        '404':
+          description: profile 不存在
+        '502':
+          description: 下游 Yahoo IM 失敗(im_send_message 回 ok=False)
+        '503':
+          description: Circuit Breaker 開啟,該帳號退避中
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                example: 60
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CircuitBreakerError'
+
+  /api/im/mark_read:
+    post:
+      summary: 標某 channel 已讀(消紅點)
+      description: |
+        **寫類,需 X-API-Token**。風險低(只動 status,不發訊息),仍走 Idempotency + CB。
+        策略:BOSH 優先,REST API 兜底。
+      security:
+        - ApiToken: []
+        - Bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImMarkReadRequest'
+      responses:
+        '200':
+          description: OK(或 idem 命中時 replay)
+          headers:
+            X-Idempotent-Replay:
+              schema:
+                type: string
+                enum: ["true"]
+              description: "只在 idem 命中時出現"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImMarkReadResponse'
+        '400':
+          description: 缺參數
+        '401':
+          description: token 缺失或不對
+        '404':
+          description: profile 不存在
+        '502':
+          description: 下游 mark_read 失敗
+        '503':
+          description: Circuit Breaker 開啟
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+
+# ────────────────────── 全局註記 ──────────────────────
+tags:
+  - name: state
+    description: 純讀,免 token,用於 daemon 觀測軟件實時狀態
+  - name: im
+    description: IM 操作,寫類需 token + Idempotency-Key
+  - name: meta
+    description: version / health,daemon 啟動先打 version 確認 compat
+
+x-additional-notes: |
+  ── daemon 端建議實作 ──
+
+  0. **port 與 token 從 XDZHGL settings.json 讀,不要 hardcode**:
+     - port: settings.json.api_port(預設 7777)
+     - token: settings.json.api_token(32 byte url-safe,XDZHGL 啟動時自動生成)
+     - daemon 啟動時讀一次,後續快取在 daemon 進程內;若打 401 → 重讀
+
+  1. 啟動順序:
+     - 先打 GET /api/version,檢 api_compat_version == "1"
+     - 不對 → log warning,退回動態 import / 子進程 fallback
+     - 對 → 保留 fallback 1 個月觀察期
+
+  2. Idempotency-Key 生成 + replay 處理:
+     - daemon 每次寫類動作:`uuid4().hex` 或 `f"{conv_id}:{action}:{int(time.time()/60)}"`
+     - 60 秒粒度 — 同分鐘內重試自動去重
+     - 響應 header `X-Idempotent-Replay: true` 出現時:這是上次響應的 cache,**不要計入成功率指標 / 不要 log 「已發送」**,
+       只要視為「之前已成功」即可
+
+  3. Circuit Breaker 處理:
+     - 收到 503:嚴格遵守 Retry-After,該帳號靜默 60s
+     - 不要嘗試其他端點繞過(server 端是 per-account)
+
+  4. H 條配合:
+     - daemon 拿到 channel_id 後不要自己解析 receiver
+     - 直接傳整個 channel_id + 提供 shop_id(從 conv_mgr 拿)
+     - server 端會驗證,daemon 不用自律
+
+  5. 5s cache 配合:
+     - GET /api/state/conversations 真實刷新間隔 5 秒
+     - daemon 不要打超過 1 次/秒(浪費)
+     - 改 phase 即時感知用 long-polling /api/events(階段 2 上線)
+
+  ── 階段 2/3 預告(api_compat_version 不會升)──
+
+  - GET /api/orders/get/{item_id}?include=shipment,perf
+  - GET /api/sourcing/lookup?yahoo_item_id=X
+  - GET /api/sourcing/trace?yahoo_item_id=X (跨 5 個檔湊全鏈路)
+  - GET /api/perf/pending
+  - GET /api/events?cursor=X&wait=25 (long-polling,取代 hook_watcher 60s 輪詢)
+  - GET /api/system/health (深度健康:cookie 新鮮度 / publish worker / disk)
+  - POST /api/control/reload_settings (白名單熱載)
