@@ -27,7 +27,7 @@ if ($os.Caption -match "Home|家庭") {
 
 Write-Host "==> [2/4] 开启 RDP 服务端 + 防火墙规则" -ForegroundColor Cyan
 Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28752"   # locale 无关：中文 Windows 的「远程桌面」组也匹配（-DisplayGroup 吃本地化名，zh-CN 下会匹配为空并在 Stop 模式中断脚本）
 # 建议保持 NLA 开启 (更安全)；如客户端不支持可自行关闭。
 Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
 
