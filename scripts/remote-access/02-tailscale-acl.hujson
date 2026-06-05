@@ -1,0 +1,46 @@
+// 02-tailscale-acl.hujson
+// 合并进 Tailscale 后台 → Access Controls 的内容。
+//
+// 做了三件事:
+//   1. derpMap: 只用你香港自建的 DERP (region 900)，关掉官方中继。
+//   2. tagOwners: 定义 tag:phone (手机) 和 tag:jp-pc (日本电脑)。
+//   3. acls: 只允许手机访问日本电脑的 RDP 3389，其余拒绝——收紧 tailnet 内暴露面。
+//
+// 用法: 把 derpMap / tagOwners / acls 三块合进你现有 ACL；
+//       给设备打 tag (设备页 Edit ACL tags，或入网时 --advertise-tags=tag:jp-pc)。
+//       记得把 HostName 改成你真实域名。
+{
+  "derpMap": {
+    "OmitDefaultRegions": true,
+    "Regions": {
+      "900": {
+        "RegionID": 900,
+        "RegionCode": "hk",
+        "Nodes": [
+          {
+            "Name": "hk1",
+            "RegionID": 900,
+            "HostName": "derp.yourdomain.com"
+          }
+        ]
+      }
+    }
+  },
+
+  "tagOwners": {
+    // 把 your-login-email@example.com 换成你 Tailscale 账号的邮箱
+    "tag:phone": ["your-login-email@example.com"],
+    "tag:jp-pc": ["your-login-email@example.com"]
+  },
+
+  "acls": [
+    // 只放行: 手机 -> 日本电脑的 RDP (3389)
+    {
+      "action": "accept",
+      "src":    ["tag:phone"],
+      "dst":    ["tag:jp-pc:3389"]
+    }
+    // 注意: 一旦 acls 段非空，未显式 accept 的流量一律拒绝。
+    // 若你还想保留管理设备的全通，可自行再加一条 src=["autogroup:admin"] dst=["*:*"]。
+  ]
+}
